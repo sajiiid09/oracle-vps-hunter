@@ -1,0 +1,18 @@
+# Local, machine-specific config (copied from config.env.example by setup.sh).
+# May contain tenancy/compartment OCIDs — never commit it.
+config.env
+
+# Everything setup.sh and hunt.sh generate at runtime: real OCIDs, your SSH
+# public key, the acquired instance's IP, PIDs and logs.
+resolved.env
+metadata.json
+SUCCESS.txt
+logs/
+.hunt.pid
+.caffeinate.pid
+
+# Credentials, in case anything ever lands here by accident.
+*.pem
+*.key
+.oci/
+.env
