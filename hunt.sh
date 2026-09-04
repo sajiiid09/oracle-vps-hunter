@@ -65,17 +65,17 @@ OCI_BASE=(oci --profile "$OCI_PROFILE" --region "$HOME_REGION")
 [ -n "$NORETRY" ] && OCI_BASE+=("$NORETRY")
 
 launch_once() {
-  local ad="$1"
+  local ad="$1" ocpus="$2" mem="$3" boot="$4"
   "${OCI_BASE[@]}" compute instance launch \
     --availability-domain "$ad" \
     --compartment-id "$COMPARTMENT_OCID" \
     --shape "$SHAPE" \
-    --shape-config "{\"ocpus\":$OCPUS,\"memoryInGBs\":$MEMORY_GB}" \
+    --shape-config "{\"ocpus\":$ocpus,\"memoryInGBs\":$mem}" \
     --image-id "$IMAGE_OCID" \
     --subnet-id "$SUBNET_OCID" \
-    --boot-volume-size-in-gbs "$BOOT_VOLUME_GB" \
+    --boot-volume-size-in-gbs "$boot" \
     --assign-public-ip true \
-    --display-name "$INSTANCE_NAME" \
+    --display-name "${INSTANCE_NAME}-${ocpus}c${mem}g" \
     --metadata "file://$METADATA_FILE" \
     --wait-for-state RUNNING \
     --wait-interval-seconds 10 \
@@ -110,7 +110,7 @@ print(json.JSONDecoder().raw_decode(raw[i:])[0]['data']['id'] if i >= 0 else '')
 " <<<"$out" 2>/dev/null)"
   [ -n "$id" ] || { log "Launch reported success but no instance OCID came back; check the console."; return 1; }
 
-  log "GOT IT — instance $id"
+  log "GOT IT — $rung — instance $id"
   ip="$("${OCI_BASE[@]}" compute instance list-vnics --instance-id "$id" --output json 2>/dev/null \
         | python3 -c "
 import sys, json
@@ -127,7 +127,8 @@ Oracle Cloud A1 instance acquired
 when       : $(date '+%Y-%m-%d %H:%M:%S %Z')
 attempts   : $(cat "$STATE" 2>/dev/null || echo '?')
 name       : $INSTANCE_NAME
-shape      : $SHAPE  ${OCPUS} OCPU / ${MEMORY_GB} GB RAM / ${BOOT_VOLUME_GB} GB boot
+shape      : $SHAPE  ${WON_OCPUS} OCPU / ${WON_MEM} GB RAM / ${WON_BOOT} GB boot
+ladder     : tried ${#TIERS[@]} rung(s): ${TIERS[*]}
 region     : $HOME_REGION
 image      : $IMAGE_NAME
 instance   : $id
@@ -141,7 +142,7 @@ idle for 7 days. Run something on it.
 EOF
 
   log "public IP ${ip:-unknown} — details in SUCCESS.txt"
-  alert "Oracle A1 acquired!" "${ip:-instance created} — see SUCCESS.txt"
+  alert "Oracle A1 acquired!" "$rung at ${ip:-unknown IP} — see SUCCESS.txt"
   return 0
 }
 
@@ -150,7 +151,7 @@ fatal() {
   log "FATAL ($kind) — stopping."
   printf '%s\n' "$out" | head -40 >> "$LOG"
   case "$kind" in
-    limit)    log "You have already used your Always Free ARM allowance (4 OCPU / 24 GB total). Terminate an existing A1 instance, or lower OCPUS/MEMORY_GB in config.env." ;;
+    limit)    log "Every rung exceeds what is left of your Always Free ARM allowance (4 OCPU / 24 GB total). Terminate an existing A1 instance, or add a smaller rung to TIERS in config.env." ;;
     auth)     log "API key rejected. Regenerate the key in the console and re-run ./setup.sh" ;;
     notfound) log "An OCID is wrong or the resource was deleted. Re-run ./setup.sh to re-resolve." ;;
     unknown)  log "Unrecognised error — full output above." ;;
@@ -164,22 +165,36 @@ echo $$ > "$DIR/.hunt.pid"
 trap 'rm -f "$DIR/.hunt.pid"' EXIT
 
 read -r -a AD_LIST <<< "$ADS"
+
+[ "${#TIERS[@]}" -gt 0 ] || { echo "TIERS is empty in config.env — nothing to hunt for." >&2; exit 1; }
+for t in "${TIERS[@]}"; do
+  [[ "$t" =~ ^[0-9]+:[0-9]+:[0-9]+$ ]] || { echo "Malformed TIERS entry '$t' — expected OCPUS:MEMORY_GB:BOOT_GB." >&2; exit 1; }
+done
+
+tier_index=0
 attempt=0
 backoff=0
 ad_index=0
 interval=$BASE_INTERVAL   # self-tuning; see config.env
 clean=0                   # consecutive non-throttled responses
 
-log "hunt started (pid $$) — ${OCPUS} OCPU / ${MEMORY_GB} GB in $HOME_REGION across ${#AD_LIST[@]} AD(s), starting at ${interval}s cadence"
-[ "$MODE" = "once" ] && log "single-attempt mode"
+log "hunt started (pid $$) — ${#TIERS[@]} rung ladder [${TIERS[*]}] in $HOME_REGION across ${#AD_LIST[@]} AD(s), starting at ${interval}s cadence"
+[ "$MODE" = "once" ] && log "single-attempt mode — top rung only"
 
 while :; do
   ad="${AD_LIST[$ad_index]}"
   ad_index=$(( (ad_index + 1) % ${#AD_LIST[@]} ))
+
+  # One rung per cycle. Rotating the shape costs no extra API calls, so the
+  # request rate -- and therefore the throttling risk -- is unchanged.
+  IFS=: read -r WON_OCPUS WON_MEM WON_BOOT <<< "${TIERS[$tier_index]}"
+  rung="${WON_OCPUS}c/${WON_MEM}g/${WON_BOOT}gb"
+  tier_index=$(( (tier_index + 1) % ${#TIERS[@]} ))
+
   attempt=$(( attempt + 1 ))
   echo "$attempt" > "$STATE"
 
-  out="$(launch_once "$ad")"
+  out="$(launch_once "$ad" "$WON_OCPUS" "$WON_MEM" "$WON_BOOT")"
   rc=$?
 
   if [ $rc -eq 0 ] && grep -qE '"lifecycle-state":[[:space:]]*"RUNNING"' <<<"$out"; then
@@ -200,7 +215,7 @@ while :; do
         clean=0
         log "cadence eased to ${interval}s after $CLEAN_RUN_TO_SPEED_UP clean attempts"
       fi
-      logf "attempt $attempt  $ad  — out of capacity (every ${interval}s)"
+      logf "attempt $attempt  $rung  — out of capacity (every ${interval}s)"
       [ "$MODE" = "once" ] && { log "attempt $attempt  $ad  — out of capacity"; log "Config is correct; only capacity is missing. Start the loop with ./ctl.sh start"; exit 0; }
       ;;
     throttle)
@@ -216,11 +231,11 @@ while :; do
         interval=$(( interval + INTERVAL_STEP ))
         [ "$interval" -gt "$MAX_INTERVAL" ] && interval=$MAX_INTERVAL
       fi
-      log "attempt $attempt  $ad  — throttled (429), backing off ${backoff}s; cadence now ${interval}s"
+      log "attempt $attempt  $rung  — throttled (429), backing off ${backoff}s; cadence now ${interval}s"
       [ "$MODE" = "once" ] && exit 0
       ;;
     network)
-      log "attempt $attempt  $ad  — network unreachable, retrying in ${interval}s"
+      log "attempt $attempt  $rung  — network unreachable, retrying in ${interval}s"
       [ "$MODE" = "once" ] && exit 0
       ;;
     limit|auth|notfound|unknown)

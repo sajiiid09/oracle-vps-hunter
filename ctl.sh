@@ -36,7 +36,7 @@ start)
 
   for _ in $(seq 1 20); do alive "$PIDFILE" && break; sleep 0.5; done
   if alive "$PIDFILE"; then
-    echo "Hunting.  pid $(cat "$PIDFILE")  ·  ${OCPUS} OCPU / ${MEMORY_GB} GB / ${BOOT_VOLUME_GB} GB"
+    echo "Hunting.  pid $(cat "$PIDFILE")  ·  ladder: ${TIERS[*]}"
     echo "Watch it:  ./ctl.sh log     Stop it:  ./ctl.sh stop"
     echo "Leave the Mac plugged in and the lid open."
   else
@@ -65,7 +65,11 @@ status)
   else
     echo "STOPPED"
   fi
-  echo "target    ${OCPUS} OCPU / ${MEMORY_GB} GB RAM / ${BOOT_VOLUME_GB} GB boot"
+  echo "ladder    ${#TIERS[@]} rung(s), one per cycle:"
+  for t in "${TIERS[@]}"; do
+    IFS=: read -r c m b <<< "$t"
+    echo "            ${c} OCPU / ${m} GB RAM / ${b} GB boot"
+  done
   echo "attempts  $(cat "$STATE" 2>/dev/null || echo 0)"
   if [ -f "$DIR/SUCCESS.txt" ]; then
     echo
